@@ -770,6 +770,17 @@ int git_config_get_bool(int *out, const git_config *cfg, const char *name)
 	return git_config_parse_bool(out, entry->value);
 }
 
+int git_config_get_path(const char **out, const git_config *cfg, const char *name)
+{
+	const git_config_entry *entry;
+	int error;
+
+	if ((error = get_entry(&entry, cfg, name, true, GET_ALL_ERRORS)) < 0)
+		return error;
+
+	return git_config_parse_path(out, entry->value);
+}
+
 int git_config_get_string(
 	const char **out, const git_config *cfg, const char *name)
 {
@@ -1166,6 +1177,14 @@ int git_config_parse_int32(int32_t *out, const char *value)
 fail_parse:
 	giterr_set(GITERR_CONFIG, "Failed to parse '%s' as a 32-bit integer", value ? value : "(null)");
 	return -1;
+}
+
+int git_config_parse_path(git_buf *out, const char *value)
+{
+	if (value[0] == '~')
+		return git_sysdir_find_global_file(out, &value[1]);
+
+	return git_buf_sets(out, value);
 }
 
 /* Take something the user gave us and make it nice for our hash function */
