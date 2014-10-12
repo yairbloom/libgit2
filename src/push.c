@@ -598,11 +598,70 @@ static int do_push(git_push *push)
 {
 	int error = 0;
 	git_transport *transport = push->remote->transport;
+	git_remote_head *head;
+	git_odb *odb;
+	git_vector other_objects = GIT_VECTOR_INIT;
+	git_revwalk *walk = NULL;
+	push_spec *spec;
+	size_t i;
 
 	if (!transport->push) {
 		giterr_set(GITERR_NET, "Remote transport doesn't support push");
 		error = -1;
 		goto on_error;
+	}
+
+	if ((error = git_repository_odb__weakptr(&odb, push->repo)) < 0)
+		goto on_error;
+
+	if ((error = calculate_work(push)) < 0)
+		goto on_error;
+
+	if ((error = git_revwalk_new(&walk, push->repo)) < 0)
+		goto on_error;
+
+	/*
+	 * These are commits we want to send to the remote
+	 */
+	git_vector_foreach(&push->specs, i, spec) {
+		git_otype type;
+		size_t size;
+
+		/* deletion on the remote */
+		if (git_oid_iszero(&spec->loid))
+			continue;
+
+		/* up to date */
+		if (git_oid_equal(&spec->loid, &spec->roid))
+			continue;
+
+		if ((error = git_odb_read_header(&size, &type, odb, &spec->loid)) < 0)
+			goto on_error;
+
+		if (type == GIT_OBJ_COMMIT) {
+			error = git_revwalk_push(walk, &spec->loid);
+		} if (type == GIT_OBJ_TAG) {
+			git_object *target;
+
+			if ((error = git_tag_peel()) < 0)
+				goto on_error;
+		} else {
+			error = git_vector_insert(&other_objects, target);
+		}
+
+		if (error < 0)
+			goto on_error;
+	}
+
+	/*
+	 * These are the commits they already have
+	 */
+	git_vector_foreach(&push->remote->refs, i, head) {
+		if (git_oid_iszero(&head->oid))
+			continue;
+
+		if ((error = git_revwalk_hide(walk, &head->oid)) < 0)
+			goto on_error;
 	}
 
 	/*
@@ -611,8 +670,10 @@ static int do_push(git_push *push)
 	 * objects.  In this case the client MUST send an empty pack-file.
 	 */
 
-	if ((error = git_packbuilder_new(&push->pb, push->repo)) < 0)
+	if ((error = git_packbuilder_fromwalk(&push->pb, walk)) < 0)
 		goto on_error;
+
+	/* TODO; go through the other_objects and insert those as well */
 
 	git_packbuilder_set_threads(push->pb, push->pb_parallelism);
 
@@ -620,12 +681,16 @@ static int do_push(git_push *push)
 		if ((error = git_packbuilder_set_callbacks(push->pb, push->pack_progress_cb, push->pack_progress_cb_payload)) < 0)
 			goto on_error;
 
+	error = transport->push(transport, push);
+
+/*
 	if ((error = calculate_work(push)) < 0 ||
 		(error = queue_objects(push)) < 0 ||
 		(error = transport->push(transport, push)) < 0)
 		goto on_error;
-
+*/
 on_error:
+	git_revwalk_free(walk);
 	git_packbuilder_free(push->pb);
 	return error;
 }

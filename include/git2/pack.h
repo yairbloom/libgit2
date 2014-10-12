@@ -64,6 +64,15 @@ typedef enum {
 GIT_EXTERN(int) git_packbuilder_new(git_packbuilder **out, git_repository *repo);
 
 /**
+ * Initialize a new packbuilder from a revwalk
+ *
+ * @param out the new packbuilder object
+ * @param walk the walk to use to initiialize the pack builder.
+ * @return 0 on success or an error code.
+ */
+GIT_EXTERN(int) git_packbuilder_fromwalk(git_packbuilder **out, git_revwalk *walk);
+
+/**
  * Set number of threads to spawn
  *
  * By default, libgit2 won't spawn any threads at all;
