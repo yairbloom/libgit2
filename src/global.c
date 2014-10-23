@@ -8,7 +8,7 @@
 #include "global.h"
 #include "hash.h"
 #include "sysdir.h"
-#include "git2/threads.h"
+#include "git2/global.h"
 #include "thread-utils.h"
 
 
@@ -126,7 +126,7 @@ static void init_ssl(void)
  * Handle the global state with TLS
  *
  * If libgit2 is built with GIT_THREADS enabled,
- * the `git_threads_init()` function must be called
+ * the `git_libgit2_init()` function must be called
  * before calling any other function of the library.
  *
  * This function allocates a TLS index (using pthreads
@@ -149,9 +149,9 @@ static void init_ssl(void)
  */
 
 /*
- * `git_threads_init()` allows subsystems to perform global setup,
+ * `git_libgit2_init()` allows subsystems to perform global setup,
  * which may take place in the global scope.  An explicit memory
- * fence exists at the exit of `git_threads_init()`.  Without this,
+ * fence exists at the exit of `git_libgit2_init()`.  Without this,
  * CPU cores are free to reorder cache invalidation of `_tls_init`
  * before cache invalidation of the subsystems' newly written global
  * state.
@@ -178,7 +178,7 @@ static int synchronized_threads_init(void)
 	return error;
 }
 
-int git_threads_init(void)
+int git_libgit2_init(void)
 {
 	int error = 0;
 
@@ -203,7 +203,7 @@ static void synchronized_threads_shutdown(void)
 	git_mutex_free(&git__mwindow_mutex);
 }
 
-void git_threads_shutdown(void)
+void git_libgit2_shutdown(void)
 {
 	/* Enter the lock */
 	while (InterlockedCompareExchange(&_mutex, 1, 0)) { Sleep(0); }
@@ -265,14 +265,14 @@ static void init_once(void)
 	GIT_MEMORY_BARRIER;
 }
 
-int git_threads_init(void)
+int git_libgit2_init(void)
 {
 	pthread_once(&_once_init, init_once);
 	git_atomic_inc(&git__n_inits);
 	return init_error;
 }
 
-void git_threads_shutdown(void)
+void git_libgit2_shutdown(void)
 {
 	void *ptr = NULL;
 	pthread_once_t new_once = PTHREAD_ONCE_INIT;
@@ -313,7 +313,7 @@ git_global_st *git__global_state(void)
 
 static git_global_st __state;
 
-int git_threads_init(void)
+int git_libgit2_init(void)
 {
 	static int ssl_inited = 0;
 
@@ -326,7 +326,7 @@ int git_threads_init(void)
 	return 0;
 }
 
-void git_threads_shutdown(void)
+void git_libgit2_shutdown(void)
 {
 	/* Shut down any subsystems that have global state */
 	if (0 == git_atomic_dec(&git__n_inits))

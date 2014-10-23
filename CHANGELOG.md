@@ -107,3 +107,7 @@ v0.21 + 1
 
 * The THREADSAFE option to build libgit2 with threading support has
   been flipped to be on by default.
+
+* git_threads_init() and git_threads_shutdown() have been renamed to
+  git_libgit2_init() and git_libgit2_shutdown() to better explain what
+  their purpose is, as it's grown to be more than just about threads.
