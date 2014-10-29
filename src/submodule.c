@@ -835,6 +835,166 @@ git_submodule_recurse_t git_submodule_set_fetch_recurse_submodules(
 	return old;
 }
 
+static int submodule_repo_create(
+	git_repository **out,
+	git_repository *parent_repo,
+	const char *path,
+	bool use_gitlink)
+{
+	int error = 0;
+	git_buf workdir = GIT_BUF_INIT, repodir = GIT_BUF_INIT;
+	git_repository_init_options initopt = GIT_REPOSITORY_INIT_OPTIONS_INIT;
+	git_repository *subrepo = NULL;
+
+	error = git_buf_joinpath(&workdir, git_repository_workdir(parent_repo), path);
+	if (error < 0)
+		goto cleanup;
+
+	initopt.flags = GIT_REPOSITORY_INIT_MKPATH | GIT_REPOSITORY_INIT_NO_REINIT;
+
+	/* New style: sub-repo goes in <repo-dir>/modules/<name>/ with a
+	 * gitlink in the sub-repo workdir directory to that repository
+	 *
+	 * Old style: sub-repo goes directly into repo/<name>/.git/
+	 */
+	if (use_gitlink) {
+		error = git_buf_join3(
+			&repodir, '/', git_repository_path(parent_repo), "modules", path);
+		if (error < 0)
+			goto cleanup;
+
+		initopt.workdir_path = workdir.ptr;
+		initopt.flags |=
+			GIT_REPOSITORY_INIT_NO_DOTGIT_DIR |
+			GIT_REPOSITORY_INIT_RELATIVE_GITLINK;
+
+		error = git_repository_init_ext(&subrepo, repodir.ptr, &initopt);
+	} else
+		error = git_repository_init_ext(&subrepo, workdir.ptr, &initopt);
+
+cleanup:
+	git_buf_free(&workdir);
+	git_buf_free(&repodir);
+
+	*out = subrepo;
+
+	return error;
+}
+
+static int git_submodule_update_repo_init_cb(
+	git_repository **out,
+	const char *path,
+	int bare,
+	void *payload)
+{
+	GIT_UNUSED(bare);
+	git_submodule *sm = payload;
+
+	return submodule_repo_create(out, sm->repo, path, 1);
+}
+
+int git_submodule_do_update(git_submodule *sm, int init, git_submodule_update_options *_update_options)
+{
+	int error;
+	unsigned int submodule_status;
+	git_config *config = NULL;
+	const char *submodule_url;
+	git_repository *sub_repo = NULL;
+	git_remote *remote = NULL;
+	git_object *target_commit = NULL;
+	git_buf buf = GIT_BUF_INIT;
+	git_submodule_update_options update_options = GIT_SUBMODULE_UPDATE_OPTIONS_INIT;
+	git_clone_options clone_options = GIT_CLONE_OPTIONS_INIT;
+
+	assert(sm);
+
+	if (_update_options)
+		memcpy(&update_options, _update_options, sizeof(git_submodule_update_options));
+
+	GITERR_CHECK_VERSION(&update_options, GIT_SUBMODULE_UPDATE_OPTIONS_VERSION, "git_submodule_update_options");
+
+	/* Copy over the remote callbacks */
+	clone_options.remote_callbacks = update_options.remote_callbacks;
+	clone_options.signature = update_options.signature;
+
+	/* Get the status of the submodule to determine if it is already initialized  */
+	if ((error = git_submodule_status(&submodule_status, sm)) < 0)
+		goto done;
+
+	/*
+	 * If submodule work dir is not already initialized, check to see
+	 * what we need to do (initialize, clone, return error...)
+	 */
+	if (submodule_status & GIT_SUBMODULE_STATUS_WD_UNINITIALIZED) {
+		/*
+		 * Work dir is not initialized, check to see if the submodule
+		 * info has been copied into .git/config
+		 */
+		if ((error = git_repository_config(&config, sm->repo)) < 0 ||
+			(error = git_buf_printf(&buf, "submodule.%s.url", git_submodule_name(sm))) < 0)
+			goto done;
+
+		if ((error = git_config_get_string(&submodule_url, config, git_buf_cstr(&buf))) < 0) {
+			/*
+			 * If the error is not "not found" or if it is "not found" and we are not
+			 * initializing the submodule, then return error.
+			 */
+			if (error != GIT_ENOTFOUND)
+				goto done;
+
+			if (error == GIT_ENOTFOUND && !init) {
+				giterr_set(GITERR_SUBMODULE, "Submodule is not initialized.");
+				error = GIT_ERROR;
+				goto done;
+			}
+
+			/* The submodule has not been initialized yet - initialize it now.*/
+			if ((error = git_submodule_init(sm, 0)) < 0)
+				goto done;
+
+			if ((error = git_config_get_string(&submodule_url, config, git_buf_cstr(&buf))) < 0)
+				goto done;
+		}
+
+		/** submodule is initialized - now clone it **/
+		/* override repo creation */
+		clone_options.repository_cb = git_submodule_update_repo_init_cb;
+		clone_options.repository_cb_payload = sm;
+
+		/*
+		 * Do not perform checkout as part of clone, instead we 
+		 * will checkout the specific commit manually.
+		 */
+		clone_options.checkout_opts.checkout_strategy = GIT_CHECKOUT_NONE;
+		update_options.checkout_opts.checkout_strategy = update_options.clone_checkout_strategy;
+
+		if ((error = git_clone(&sub_repo, submodule_url, sm->path, &clone_options)) < 0 ||
+			(error = git_repository_set_head_detached(sub_repo, git_submodule_index_id(sm), update_options.signature, NULL)) < 0 ||
+			(error = git_checkout_head(sub_repo, &update_options.checkout_opts)) != 0)
+			goto done;
+	} else {
+		/**
+		 * Work dir is initialized - look up the commit in the parent repository's index,
+		 * update the workdir contents of the subrepository, and set the subrepository's
+		 * head to the new commit.
+		 */
+		if ((error = git_submodule_open(&sub_repo, sm)) < 0 ||
+			(error = git_object_lookup(&target_commit, sub_repo, git_submodule_index_id(sm), GIT_OBJ_COMMIT)) < 0 ||
+			(error = git_checkout_tree(sub_repo, target_commit, &update_options.checkout_opts)) != 0 ||
+			(error = git_repository_set_head_detached(sub_repo, git_submodule_index_id(sm), update_options.signature, NULL)) < 0)
+			goto done;
+	}
+
+done:
+	git_config_free(config);
+	git_repository_free(sub_repo);
+	git_remote_free(remote);
+	git_buf_free(&buf);
+
+	git_object_free(target_commit);
+	return error;
+}
+
 int git_submodule_init(git_submodule *sm, int overwrite)
 {
 	int error;
