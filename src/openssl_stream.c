@@ -17,6 +17,7 @@
 #include "posix.h"
 #include "stream.h"
 #include "socket_stream.h"
+#include "netops.h"
 #include "git2/transport.h"
 
 static int ssl_set_error(SSL *ssl, int error)
